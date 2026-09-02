@@ -34,6 +34,8 @@ kube-prometheus-stack·Loki 설치부터 kustomize 앱 배포, Vault 시크릿 �
 - External Secrets Operator, cert-manager (사전 설치)
 - ArgoCD (workloads/ 를 GitOps로 쓸 경우)
 
+빈 클러스터에서 처음 세운다면 [docs/bootstrap.md](docs/bootstrap.md) 순서를 따르세요 — 사전 구성요소 설치부터 선행 Secret, 검증까지 다룹니다.
+
 ## Usage
 
 **관측 스택** — `monitoring/env/{dev,prod}.yaml`의 grafana host·ingress class·storage class와 helmfile의 `<dev-context>`/`<prod-context>`를 교체한 뒤:

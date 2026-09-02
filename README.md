@@ -2,7 +2,7 @@
 
 ![License](https://img.shields.io/badge/license-MIT-blue) ![Helmfile](https://img.shields.io/badge/helmfile-v1-blue) ![Kustomize](https://img.shields.io/badge/kustomize-ArgoCD-blue)
 
-kube-prometheus-stack·Loki 설치부터 kustomize 앱 배포, Vault 시크릿 주입까지, 운영 중인 클러스터에서 그대로 가져온 구성입니다. 환경 값만 바꾸면 돌아갑니다.
+kube-prometheus-stack·Loki 설치부터 kustomize 앱 배포, Vault 시크릿 주입까지 한 벌로 갖춘 쿠버네티스 구성입니다. 환경 값만 바꾸면 돌아갑니다.
 
 보일러플레이트와 다른 점은 구성마다 판단이 들어 있다는 것입니다. liveness가 왜 httpGet이어야 하는지, HPA 워크로드에 왜 replicas를 안 쓰는지 같은 것들이고, 근거는 [docs/](docs/)에 있습니다.
 

@@ -13,7 +13,7 @@ kube-prometheus-stack·Loki 설치부터 kustomize 앱 배포, Vault 시크릿 �
 | [monitoring/](monitoring/) | kube-prometheus-stack + Loki + Alloy 설치 helmfile. Alertmanager Slack 라우팅, Grafana ingress, OOM·재시작·CPU throttling 알림 룰 포함 | `helmfile -e dev apply` |
 | [workloads/](workloads/) | kustomize base/overlay + ArgoCD Application. probe·HPA·리소스·Secret 주입이 표준대로 들어간 예시 앱 | `kubectl kustomize workloads/overlays/dev` |
 | [credentials/](credentials/) | Vault → External Secrets Operator 패턴. ns 라벨만으로 pull secret 자동 배포, terraform은 secret 메타만 추적 | 파일별 주석 |
-| [docs/](docs/) | probe 표준, 운영 규칙(sync 전 이미지 대조, 배포 완료 판정 등) | — |
+| [docs/](docs/) | probe 표준, 운영 규칙(sync 전 이미지 대조, 배포 완료 판정 등), GitOps 저장소 레이아웃 | — |
 
 ## 구성에 들어 있는 판단
 

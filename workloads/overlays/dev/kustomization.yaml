@@ -1,0 +1,8 @@
+resources:
+  - ../../base/example-app
+images:
+  # 이미지 태그는 overlay 에 pin 한다. latest 로 두면 sync 가 곧 배포가 아니게 되고,
+  # git 에 없는 우회 배포가 섞이면 sync 가 운영 이미지를 과거로 되감는다 —
+  # sync 전 git↔live 이미지 대조가 필요한 이유 (docs/operations.md)
+  - name: <registry>/example-app
+    newTag: 1.0.0

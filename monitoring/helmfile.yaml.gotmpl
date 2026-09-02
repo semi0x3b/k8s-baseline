@@ -1,0 +1,90 @@
+# 모니터링 스택 관리 정책 (root helmfile/ 과 분리된 독립 helmfile)
+#   ✅ 관리: kube-prometheus-stack(Prometheus+Grafana+Alertmanager), loki, alloy
+#   - 적용: helmfile -e dev  -f monitoring/helmfile.yaml.gotmpl apply   (dev)
+#           helmfile -e prod -f monitoring/helmfile.yaml.gotmpl apply   (prod)
+#     ※ -e 생략 시 dev 로 동작 (default = dev)
+#   - 환경별 차이(그라파나 호스트, ingress 클래스)는 env/{dev,prod}.yaml 에만 존재
+#   - namespace: monitoring 단일 사용
+#   - 기존 helmfile/helmfile.yaml (external-secrets, cert-manager, kyverno) 과 완전 분리.
+#
+# 버전 정책:
+#   - loki 6.55.0: grafana repo OSS 마지막 버전.
+#     2026-03-16부터 OSS chart는 grafana-community repo(17.x)로 이관됨 — 추후 이관 검토.
+#   - alloy: promtail 후속 (promtail 은 EOL). 로그 수집 DaemonSet.
+#
+# 사전 준비 (README.md 참고):
+#   - 대상 클러스터 kubectl context 확인 필수!
+#   - Grafana admin secret 생성 필수:
+#     kubectl -n monitoring create secret generic grafana-admin \
+#       --from-literal=admin-user=admin --from-literal=admin-password='<비번>'
+# 환경별 kube context 고정 — 2026-09-01 dev values 가 prod 컨텍스트에 적용된 사고 재발 방지.
+# 현재 kubectl context 와 무관하게 -e <env> 가 곧 대상 클러스터다.
+helmDefaults:
+  kubeContext: {{ if eq .Environment.Name "prod" }}<prod-context>{{ else }}<dev-context>{{ end }}
+
+environments:
+  default:
+    values:
+      - env/dev.yaml
+  dev: # OKE dev
+    values:
+      - env/dev.yaml
+  prod: # OKE prod
+    values:
+      - env/prod.yaml
+
+---
+repositories:
+  - name: prometheus-community
+    url: https://prometheus-community.github.io/helm-charts
+  - name: grafana
+    url: https://grafana.github.io/helm-charts
+
+releases:
+  - name: kube-prometheus-stack
+    namespace: monitoring
+    createNamespace: true
+    chart: prometheus-community/kube-prometheus-stack
+    version: 86.2.0
+    values:
+      - values/kube-prometheus-stack.yaml.gotmpl
+    # chart 가 CRD 와 그 CRD 의 CR(Prometheus/Alertmanager/Rule 등)을 동시에 포함 →
+    # 최초 설치 시 diff 검증이 CRD 부재로 실패. 검증 스킵 (부트스트랩 순서 문제)
+    disableValidation: true
+
+  - name: loki
+    namespace: monitoring
+    createNamespace: true
+    chart: grafana/loki
+    version: 6.55.0
+    values:
+      - values/loki.yaml.gotmpl
+
+  - name: alloy
+    namespace: monitoring
+    createNamespace: true
+    chart: grafana/alloy
+    version: 1.10.0
+    values:
+      - values/alloy.yaml
+    needs:
+      - monitoring/loki
+    # 최초 설치 시 ServiceMonitor CRD(kube-prometheus-stack 이 설치)가 아직 없어
+    # diff 검증이 실패함 → 검증 스킵 (부트스트랩 순서 문제, 리소스엔 영향 없음)
+    disableValidation: true
+
+  - name: incident-bot
+    namespace: monitoring
+    chart: ./charts/incident-bot
+    installed: {{ .Values | get "incident_bot_enabled" false }} # prod 전용 — false 면 apply 시 uninstall
+    needs:
+      - monitoring/loki # 로그 조회 대상
+
+  # 에러로그 자동 부검 룰 (Loki ruler) — [ERROR] 그물 + ERR-2003 온도계.
+  # ConfigMap(label: loki_rule)만 배포 → loki-sc-rules 사이드카가 자동 로드 (loki 재시작 불필요)
+  # 알림 흐름: ruler → Alertmanager(pipeline=log-autopsy) → incident-bot /logs → Notion 에러 트래커
+  - name: loki-rules
+    namespace: monitoring
+    chart: ./charts/loki-rules
+    needs:
+      - monitoring/loki # ruler 가 평가 주체

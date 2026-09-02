@@ -1,0 +1,4 @@
+# prod 환경 값 (helmfile -e prod)
+grafana_host: grafana.example.com
+ingress_class: <prod-ingress-class>
+storage_class: <storage-class>

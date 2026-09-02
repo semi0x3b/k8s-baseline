@@ -1,0 +1,19 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: example-app-prod
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: git@github.com:<org>/<gitops-repo>.git
+    targetRevision: main # dev 는 develop 등 환경별 브랜치 — 혼동이 잦은 지점이라 명시
+    path: workloads/overlays/prod
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: <app-namespace>
+  syncPolicy:
+    # automated 를 켜기 전에 sync 전 이미지 대조 절차(docs/operations.md)가
+    # 자동화돼 있는지부터 확인한다
+    syncOptions:
+      - CreateNamespace=true

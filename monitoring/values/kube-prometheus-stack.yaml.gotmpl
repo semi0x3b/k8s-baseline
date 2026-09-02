@@ -1,0 +1,269 @@
+# kube-prometheus-stack values (helmfile 환경 템플릿)
+# - 환경별 값({{`{{ .Values.* }}`}})은 monitoring/env/{dev,prod}.yaml 에서 주입됨
+# Prometheus Operator + Prometheus + Grafana + Alertmanager + node-exporter + kube-state-metrics
+
+# ── OKE managed control plane 은 scrape 불가 → 비활성화 ──
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false
+kubeEtcd:
+  enabled: false
+
+defaultRules:
+  rules:
+    kubeControllerManager: false
+    kubeSchedulerAlerting: false
+    kubeSchedulerRecording: false
+    kubeProxy: false
+    etcd: false
+
+# ── Prometheus ──
+prometheus:
+  prometheusSpec:
+    # 2026-08-03 retention 15d → 90d (PVC 50→150Gi 온라인 확장 선행).
+    # 근거: 15d 실사용 10GiB → 90d 예상 60~80GiB. retentionSize 는 PV 대비 여유 10Gi 로
+    # 디스크 꽉참 방지 캡 — 실사용이 140GB 에 먼저 닿으면 보관이 90d 보다 짧아지므로
+    # 두 달 뒤 사용량 재확인 (KubePersistentVolumeFillingUp 기본 룰이 감시)
+    retention: 90d
+    retentionSize: 140GB
+    # helm values 로 만든 ServiceMonitor/PodMonitor/Rule 외에도
+    # label 무관하게 클러스터 전체 리소스 수집 (tenant 앱 모니터링용)
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: {{ .Values.storage_class }}
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 150Gi # 90d retention 용 (2026-08-03, 기존 PVC 는 patch 로 확장)
+    resources:
+      requests:
+        cpu: 200m
+        memory: 1Gi
+      limits:
+        memory: 2Gi
+
+# ── Alertmanager ──
+# Slack 발송 (2026-07-31): Incoming Webhook URL 은 git 에 넣지 않는다 — 클러스터
+# Secret(alertmanager-slack, key: webhookUrl)을 pod 에 마운트해 api_url_file 로 참조.
+# 라우팅: severity info/none 과 Watchdog 은 버리고, warning 이상만 #lms_health_check 로.
+alertmanager:
+  config:
+    global:
+      resolve_timeout: 5m
+    route:
+      receiver: slack
+      group_by: ['alertname', 'namespace']
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 12h
+      routes:
+{{ if .Values | get "incident_bot_enabled" false }}
+        # OOMKilled 는 incident-bot + slack 양쪽으로.
+        # ※ 자식 라우트가 매칭되면 루트 수신자(slack)로 안 내려가므로, continue 뒤에
+        #   slack 라우트를 명시해야 [FIRING]/[RESOLVED] 기본 알림이 유지된다 (실측 버그 수정)
+        - matchers: ['alertname = "ContainerOOMKilled"']
+          receiver: incident-bot-oom
+          continue: true
+        - matchers: ['alertname = "ContainerOOMKilled"']
+          receiver: slack
+        # HPA max 붙박이 → incident-bot 이 3분기 진단 (재시작루프/상황종료/부하지속) 첨부
+        - matchers: ['alertname = "KubeHpaMaxedOut"']
+          receiver: incident-bot-hpa
+          continue: true
+        - matchers: ['alertname = "KubeHpaMaxedOut"']
+          receiver: slack
+        # 에러로그 자동 부검 (loki-rules 차트의 2룰) → incident-bot /logs 단독. Slack 미발송 —
+        # 카드 대신 Notion 에러 트래커 DB 에 지문 upsert. severity=info 라 아래 null 라우트보다
+        # 먼저 와야 함 (라우트는 순서 평가)
+        - matchers: ['pipeline = "log-autopsy"']
+          receiver: incident-bot-logs
+          # 크론성 에러는 매시간 발화→해소를 반복(flapping)함. send_resolved=false 상태에선
+          # 해소가 알림 장부에 기록되지 않아 재발화가 "중복"으로 취급돼 repeat_interval(12h)
+          # 동안 통째로 삼켜짐 — 08-11 실측 (17:00~13:00 매시 task_failed 전부 미배달).
+          # → pod 단위 그룹 + 짧은 반복 주기로 매 회 배달. 스팸 방지는 노션 upsert 가 담당.
+          group_by: ['alertname', 'namespace', 'pod']
+          group_wait: 30s
+          group_interval: 5m
+          repeat_interval: 5m
+{{ end }}
+        - matchers: ['alertname = "Watchdog"']   # 파이프라인 생존 확인용 상시 발화 — 발송 제외
+          receiver: 'null'
+        - matchers: ['severity =~ "info|none"']  # 소음 차단 — 룰은 평가되고 UI 에는 보임
+          receiver: 'null'
+    inhibit_rules:
+      # 같은 대상에 critical 이 떠 있으면 warning 은 숨김
+      - source_matchers: ['severity = "critical"']
+        target_matchers: ['severity = "warning"']
+        equal: ['alertname', 'namespace']
+    receivers:
+      - name: 'null'
+{{ if .Values | get "incident_bot_enabled" false }}
+      - name: incident-bot-oom
+        webhook_configs:
+          - url: http://incident-bot.monitoring.svc.cluster.local:8080/alert
+            send_resolved: false # 해소 시엔 로그 조회 불필요
+      - name: incident-bot-hpa
+        webhook_configs:
+          - url: http://incident-bot.monitoring.svc.cluster.local:8080/hpa
+            send_resolved: false # 진단은 발화 시에만
+      - name: incident-bot-logs
+        webhook_configs:
+          - url: http://incident-bot.monitoring.svc.cluster.local:8080/logs
+            # true 필수: 해소 통지가 알림 장부에 남아야 다음 재발화가 "신규"로 취급됨
+            # (enricher 는 status!=firing 을 어차피 무시하므로 부작용 없음)
+            send_resolved: true
+{{ end }}
+      - name: slack
+        slack_configs:
+          - api_url_file: /etc/alertmanager/secrets/alertmanager-slack/webhookUrl
+            send_resolved: true  # 해소 시 RESOLVED 자동 발송
+            title: {{ `'[{{ .Status | toUpper }}{{ if eq .Status "firing" }}:{{ .Alerts.Firing | len }}{{ end }}] {{ .CommonLabels.alertname }}'` }}
+            # 기본 title_link 는 클러스터 내부 DNS(ExternalURL)라 클릭해도 안 열림.
+            # 빈 문자열('')은 미설정 취급 → 기본값 폴백 (2026-09-01 실측) — 유효한 외부 주소로 교체.
+            title_link: 'https://{{ .Values.grafana_host }}/alerting/list?search={{ `{{ .CommonLabels.alertname }}` }}'
+            # 대상 식별: HPA/Deployment 계열 알림은 pod 라벨이 kube-state-metrics(지표 수집기)를
+            # 가리키므로, 리소스 라벨(horizontalpodautoscaler/deployment/...)을 우선 표기
+            text: {{ `'{{ range .Alerts }}• {{ .Labels.namespace }}/{{ or .Labels.horizontalpodautoscaler .Labels.deployment .Labels.statefulset .Labels.daemonset .Labels.job_name .Labels.persistentvolumeclaim .Labels.pod .Labels.node "?" }}{{ if and .Labels.container (not .Labels.horizontalpodautoscaler) }} ({{ .Labels.container }}){{ end }} — {{ .Annotations.summary }}{{ "\n" }}{{ end }}'` }}
+  alertmanagerSpec:
+    secrets:
+      - alertmanager-slack  # /etc/alertmanager/secrets/alertmanager-slack/ 에 마운트
+    storage:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: {{ .Values.storage_class }}
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 5Gi
+    resources:
+      requests:
+        cpu: 20m
+        memory: 64Mi
+      limits:
+        memory: 128Mi
+
+# ── Grafana ──
+grafana:
+  enabled: true
+
+  # k8s-sidecar(dashboard/datasource) 의 kube API TLS 검증.
+  # EKS sandbox(2020 생성) 클러스터 CA 는 Authority Key Identifier 확장이 없어,
+  # 신형 sidecar(OpenSSL 3.x)가 인증서 검증에 실패해 CrashLoop → env 로 게이트 (OKE=false)
+  sidecar:
+    skipTlsVerify: {{ .Values.sidecar_skip_tls | default false }}
+
+  admin:
+    existingSecret: grafana-admin
+    userKey: admin-user
+    passwordKey: admin-password
+  persistence:
+    enabled: true
+    storageClassName: {{ .Values.storage_class }}
+    size: 10Gi
+  # Prometheus datasource 는 chart 가 자동 등록. Loki 만 추가.
+  additionalDataSources:
+    - name: Loki
+      type: loki
+      access: proxy
+      url: http://loki.monitoring.svc.cluster.local:3100
+      isDefault: false
+  resources:
+    requests:
+      cpu: 100m
+      memory: 768Mi # 실측 평시 ~650Mi (rightsizing 대시보드, 2026-07-09)
+    limits:
+      memory: 1Gi # 512Mi 로 운영 중 OOMKilled 발생 → 상향
+  # 외부 노출 (ingress + cert-manager TLS) — 호스트/클래스는 env 파일에서 주입
+  # class 선언 방식이 클러스터마다 다름:
+  #   OKE = spec.ingressClassName 필드 (IngressClass 오브젝트 등록됨)
+  #   일부 환경 = kubernetes.io/ingress.class 어노테이션 (IngressClass 오브젝트 미등록 +
+  #         ALB webhook 이 존재하지 않는 IngressClass 필드를 거부 → 어노테이션 사용)
+  ingress:
+    enabled: true
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+      {{- if .Values.ingress_class_via_annotation }}
+      kubernetes.io/ingress.class: {{ .Values.ingress_class }}
+      {{- end }}
+    {{- if not .Values.ingress_class_via_annotation }}
+    ingressClassName: {{ .Values.ingress_class }}
+    {{- end }}
+    hosts:
+      - {{ .Values.grafana_host }}
+    tls:
+      - secretName: grafana-tls
+        hosts:
+          - {{ .Values.grafana_host }}
+
+# ── exporters ──
+prometheus-node-exporter:
+  resources:
+    requests:
+      cpu: 20m
+      memory: 32Mi
+    limits:
+      memory: 64Mi
+
+kube-state-metrics:
+  resources:
+    requests:
+      cpu: 20m
+      memory: 64Mi
+    limits:
+      memory: 128Mi
+
+# ── 커스텀 룰 (리소스 산정 체계 연동, 2026-07-31) ──
+# 기본 룰이 못 보는 3가지: OOM 예고(limit 90% 지속) · OOM 사후(k8s 이벤트가 없어
+# Botkube 도 못 봄) · 스로틀링 지속(CPU limit 재유입 감시). 나머지 필수 알림은
+# 기본 룰 활용: KubeNodeNotReady, NodeMemoryHighUtilization, KubeHpaMaxedOut,
+# KubeDeploymentReplicasMismatch, KubeContainerWaiting, KubePodCrashLooping 등.
+additionalPrometheusRulesMap:
+  lms-rightsizing:
+    groups:
+      - name: lms.rightsizing
+        rules:
+          # OOM 예고 — limit 의 90% 를 30분 지속 (limit=req×2 이므로 request 의 180%
+          # 를 쥐고 있다는 뜻 = 누수 또는 과소산정. EKS progress 누수가 이 패턴)
+          - alert: MemNearLimitSustained
+            expr: |
+              max by (namespace, pod, container) (container_memory_working_set_bytes{namespace=~"<ns-1>|<ns-2>", container!="", container!="POD"})
+                / on (namespace, pod, container)
+              max by (namespace, pod, container) (kube_pod_container_resource_limits{resource="memory"})
+                > 0.9
+            for: 30m
+            labels:
+              severity: warning
+            annotations:
+              summary: {{ `'mem 이 limit 의 {{ $value | humanizePercentage }} — 30분 지속, OOM 예고 (request 재산정 또는 누수 확인)'` }}
+          # OOM 사후 — OOMKill 은 k8s 이벤트가 발생하지 않아 이벤트 기반(Botkube)으로는
+          # 감지 불가. 재시작 발생 + 마지막 종료 사유 OOMKilled 조합으로 감지
+          - alert: ContainerOOMKilled
+            expr: |
+              increase(kube_pod_container_status_restarts_total{namespace=~"<ns-1>|<ns-2>"}[10m]) > 0
+                and on (namespace, pod, container)
+              kube_pod_container_status_last_terminated_reason{reason="OOMKilled"} == 1
+            labels:
+              severity: critical
+            annotations:
+              summary: 'OOMKilled 발생 — mem limit 도달로 강제 종료됨'
+          # 스로틀링 지속 — 현재 CPU limit 은 board·cms·inquiry(미측정 신규)뿐이지만,
+          # LimitRange 자동 주입이나 limit 재유입 시 즉시 잡는 안전망 (EKS 실측:
+          # 낮은 limit 은 스로틀링 유발 — admin-v2 14.5% 사례)
+          - alert: CPUThrottlingSustained
+            expr: |
+              sum by (namespace, pod, container) (rate(container_cpu_cfs_throttled_periods_total{namespace=~"<ns-1>|<ns-2>", container!="", container!="POD"}[5m]))
+                / sum by (namespace, pod, container) (rate(container_cpu_cfs_periods_total{namespace=~"<ns-1>|<ns-2>", container!="", container!="POD"}[5m]))
+                > 0.05
+            for: 30m
+            labels:
+              severity: warning
+            annotations:
+              summary: {{ `'CPU 스로틀링 {{ $value | humanizePercentage }} — 30분 지속 (limit 확인: 정책상 CPU limit 미설정이어야 함)'` }}

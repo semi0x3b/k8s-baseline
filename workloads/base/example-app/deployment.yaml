@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: example-app
+spec:
+  # replicas 를 명시하지 않는다 — HPA 대상 워크로드에 spec.replicas 가 있으면
+  # GitOps sync 때마다 그 값으로 강제 축소돼 HPA 와 영구 충돌한다
+  selector:
+    matchLabels:
+      app: example-app
+  template:
+    metadata:
+      labels:
+        app: example-app
+    spec:
+      containers:
+        - name: app
+          image: <registry>/example-app:latest # overlay 에서 태그 pin
+          ports:
+            - name: http
+              containerPort: 8080
+          # probe 표준 (docs/probe-standard.md):
+          # - httpGet 사용. tcpSocket 은 포트 응답을 커널이 대신해 주기 때문에
+          #   앱이 멈춰도(행) 검사를 통과한다
+          # - timeoutSeconds 명시. 기본 1초는 부하 시 오탐 재시작을 만든다
+          readinessProbe:
+            httpGet: {path: /health, port: http}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet: {path: /health, port: http}
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3 # 감지 시간 최대 ~45초
+          envFrom:
+            - secretRef:
+                name: example-app-env # ESO 가 Vault 에서 sync (credentials/ 참조)
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {memory: 512Mi} # CPU limit 은 두지 않는다 (throttling 회피)

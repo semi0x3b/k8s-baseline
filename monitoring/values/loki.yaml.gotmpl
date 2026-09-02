@@ -1,0 +1,91 @@
+# loki values (chart 6.55.0)
+# SingleBinary(monolithic) 모드 — 1차 뼈대 구성. filesystem storage + PVC.
+# 트래픽 증가 시 SimpleScalable + Object Storage(OCI S3 / AWS S3 호환) 전환 검토.
+# ※ storageClass 는 env 파일에서 주입 (OKE=oci-bv / EKS=gp3) — .gotmpl 로 렌더됨.
+
+deploymentMode: SingleBinary
+
+loki:
+  auth_enabled: false # 단일 테넌트 (X-Scope-OrgID 불필요)
+  commonConfig:
+    replication_factor: 1
+  storage:
+    type: filesystem
+  schemaConfig:
+    configs:
+      - from: "2026-01-01"
+        store: tsdb
+        object_store: filesystem
+        schema: v13
+        index:
+          prefix: loki_index_
+          period: 24h
+  limits_config:
+    retention_period: 720h # 30일 보관 (08-10 실측: 7일치 1.5Gi → 30일 ≈ 6.5Gi / 실볼륨 50Gi 의 13%)
+    # ── 쿼리 메모리 보호 (08-10: 7d 쿼리마다 readiness 질식 → Grafana "연결 끊김" 재발 방지) ──
+    max_query_parallelism: 8        # 기본 32 — 쪼갠 조각의 동시 처리 수 제한 (병렬 = 메모리)
+    split_queries_by_interval: 1h   # 장기간 쿼리를 1h 조각으로 순차 처리
+  compactor:
+    retention_enabled: true
+    delete_request_store: filesystem
+  # ── ruler: LogQL 알림 룰 평가 → Alertmanager 발사 (에러로그 자동 부검 파이프라인 1단) ──
+  # 룰 배포는 기존 loki-sc-rules 사이드카가 label(loki_rule) 붙은 ConfigMap 을 자동 로드.
+  rulerConfig:
+    storage:
+      type: local
+      local:
+        directory: /rules # sidecar 가 /rules/fake/ 에 룰 파일 배치 (single-tenant 이름 = fake)
+    rule_path: /tmp/loki-rules-scratch
+    alertmanager_url: http://kube-prometheus-stack-alertmanager.monitoring.svc.cluster.local:9093
+    enable_alertmanager_v2: true
+
+singleBinary:
+  replicas: 1
+  persistence:
+    enabled: true
+    storageClass: {{ .Values.storage_class }}
+    size: 30Gi # 실물은 OCI Block Volume 최소단위 50Gi 로 생성돼 있음 (kubelet stats 실측 48.9Gi)
+  resources:
+    requests:
+      cpu: 300m
+      memory: 1Gi # 512Mi → 1Gi (08-10: 대형 쿼리 시 GC 발작으로 readiness 실패 x70/4d)
+    limits:
+      memory: 3Gi # 1Gi → 3Gi (worker E4 16G × 6 — 여유 충분)
+
+# ── SingleBinary 외 컴포넌트 전부 비활성화 ──
+read:
+  replicas: 0
+write:
+  replicas: 0
+backend:
+  replicas: 0
+
+gateway:
+  enabled: false # 서비스 loki:3100 직접 사용
+
+chunksCache:
+  enabled: false # memcached 기본 8Gi 요구 → 뼈대 단계 불필요
+resultsCache:
+  enabled: false
+
+lokiCanary:
+  enabled: false
+test:
+  enabled: false
+
+# k8s-sidecar(rules) 의 kube API TLS 검증.
+# EKS sandbox CA 의 AKID 누락으로 신형 sidecar(OpenSSL 3.x)가 검증 실패 → env 로 게이트 (OKE=false)
+sidecar:
+  skipTlsVerify: {{ .Values.sidecar_skip_tls | default false }}
+  rules:
+    # ruler(local storage)는 auth_enabled=false 여도 /rules/fake/ 하위만 읽음 (테넌트명 고정 "fake").
+    # 기본 folder(/rules)로 두면 사이드카가 /rules/ 에 써서 ruler 가 룰을 영영 못 봄 — 08-10 실측
+    folder: /rules/fake
+
+monitoring:
+  selfMonitoring:
+    enabled: false
+    grafanaAgent:
+      installOperator: false
+  serviceMonitor:
+    enabled: true # kube-prometheus-stack 이 자동 수집

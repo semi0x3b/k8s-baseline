@@ -1,0 +1,4 @@
+# dev 환경 값 (helmfile -e dev)
+grafana_host: grafana.dev.example.com
+ingress_class: <dev-ingress-class>
+storage_class: <storage-class>   # 예: gp3, oci-bv

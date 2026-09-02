@@ -1,0 +1,5 @@
+resources:
+  - ../../base/example-app
+images:
+  - name: <registry>/example-app
+    newTag: 1.0.0

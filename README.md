@@ -2,7 +2,7 @@
 
 ![License](https://img.shields.io/badge/license-MIT-blue) ![Helmfile](https://img.shields.io/badge/helmfile-v1-blue) ![Kustomize](https://img.shields.io/badge/kustomize-ArgoCD-blue)
 
-쿠버네티스 클러스터를 세울 때 반복해서 쓰는 구성 모음입니다. 관측 스택, 앱 배포 패턴, 자격증명 주입, 운영 규칙 — 실제 운영 클러스터에서 쓰는 구성에서 환경 값만 `<placeholder>`로 바꾼 것입니다.
+쿠버네티스 운영 구성 레퍼런스입니다. 관측 스택 설치, 앱 배포 패턴, 자격증명 주입, 운영 규칙을 다루며, 실제 운영 중인 클러스터의 구성에서 환경 값만 `<placeholder>`로 바꿨습니다.
 
 단순 보일러플레이트가 아니라 **각 구성에 판단이 들어 있습니다.** liveness가 왜 httpGet이어야 하는지, HPA 워크로드에 왜 replicas를 안 쓰는지 같은 것들이고, 근거는 [docs/](docs/)에 있습니다.
 
